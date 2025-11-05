@@ -13,7 +13,6 @@ import argparse
 import datetime
 import os
 from os import path as osp
-import importlib
 
 import torch
 import segmentator
@@ -55,11 +54,10 @@ def export_one_scan(scan_name,
                     output_filename_prefix,
                     max_num_point,
                     forainetv2_dir,
-                    export_func,
                     test_mode=False):
     ply_file = osp.join(forainetv2_dir, scan_name + '.ply')
     mesh_vertices, semantic_labels, instance_labels, unaligned_bboxes, \
-        aligned_bboxes, axis_align_matrix, offsets = export_func(
+        aligned_bboxes, axis_align_matrix, offsets = export(
             ply_file, None, test_mode)
 
     if not test_mode:
@@ -108,7 +106,6 @@ def batch_export(max_num_point,
                  output_folder,
                  scan_names_file,
                  forainetv2_dir,
-                 export_func,
                  test_mode=False
                  ):
     if test_mode and not os.path.exists(forainetv2_dir):
@@ -130,7 +127,7 @@ def batch_export(max_num_point,
             continue
         try:
             export_one_scan(scan_name, output_filename_prefix, max_num_point,
-                            forainetv2_dir, export_func, test_mode)
+                            forainetv2_dir, test_mode)
         except Exception:
             print(f'Failed export scan: {scan_name}')
         print('-' * 20 + 'done')
@@ -138,11 +135,6 @@ def batch_export(max_num_point,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--loader',
-        default='fast',
-        choices=['orig', 'fast'],
-        help='Version of data loader to use.')
     parser.add_argument(
         '--max_num_point',
         default=None,
@@ -170,19 +162,11 @@ def main():
         default='meta_data/test_list.txt',
         help='The path of the file that stores the test scan names.')
     args = parser.parse_args()
-
-    if args.loader == 'orig':
-        loader_module = importlib.import_module('load_forainetv2_data')
-    else:
-        loader_module = importlib.import_module('load_forainetv2_data_fast')
-    export_func = loader_module.export
-
     batch_export(
         args.max_num_point,
         args.output_folder,
         args.train_scan_names_file,
         args.train_forainetv2_dir,
-        export_func,
         test_mode=False
         )
     batch_export(
@@ -190,7 +174,6 @@ def main():
         args.output_folder,
         args.val_scan_names_file,
         args.train_forainetv2_dir,
-        export_func,
         test_mode=False
         )
     batch_export(
@@ -198,7 +181,6 @@ def main():
         args.output_folder,
         args.test_scan_names_file,
         args.test_forainetv2_dir,
-        export_func,
         test_mode=False
         )
 

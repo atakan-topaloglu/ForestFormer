@@ -167,7 +167,7 @@ def export(ply_file,
         instance_ids[np.isin(label_ids, bg_sem)] = -1
     
 
-        '''
+        
         # Get unique instance IDs that are not -1
         unique_instance_ids = np.unique(instance_ids[instance_ids != -1])
     
@@ -181,21 +181,21 @@ def export(ply_file,
         # Set background points back to 0
         new_instance_ids[instance_ids == -1] = 0
         instance_ids = new_instance_ids
-        '''
-        # Create a mask for non-background points
-        valid_mask = instance_ids != -1
+        
+        # # Create a mask for non-background points
+        # valid_mask = instance_ids != -1
 
-        # Create a new array for instance IDs, initialized to 0
-        new_instance_ids = np.zeros_like(instance_ids)
+        # # Create a new array for instance IDs, initialized to 0
+        # new_instance_ids = np.zeros_like(instance_ids)
 
-        # Keep the original instance IDs without making them continuous
-        new_instance_ids[valid_mask] = instance_ids[valid_mask]
+        # # Keep the original instance IDs without making them continuous
+        # new_instance_ids[valid_mask] = instance_ids[valid_mask]
 
-        # Set background points back to 0
-        new_instance_ids[instance_ids == -1] = 0
+        # # Set background points back to 0
+        # new_instance_ids[instance_ids == -1] = 0
 
-        # Assign the result back to instance_ids
-        instance_ids = new_instance_ids
+        # # Assign the result back to instance_ids
+        # instance_ids = new_instance_ids
 
         unaligned_bboxes = extract_bbox(points, label_ids, instance_ids, bg_sem)
         aligned_bboxes = extract_bbox(aligned_mesh_vertices, label_ids, instance_ids, bg_sem)
