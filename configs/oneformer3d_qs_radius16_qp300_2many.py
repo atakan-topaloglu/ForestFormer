@@ -239,8 +239,7 @@ default_hooks = dict(
         logger=dict(type='LoggerHook', interval=20),
         visualization=dict(type='Det3DVisualizationHook', draw=False))
 
-vis_backends = [dict(type='LocalVisBackend'),
-                dict(type='TensorboardVisBackend')]
+vis_backends = [dict(type='LocalVisBackend')]
 visualizer = dict(
     type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')
 

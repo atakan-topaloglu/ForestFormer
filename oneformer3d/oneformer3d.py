@@ -7,6 +7,7 @@ import MinkowskiEngine as ME
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import PointData
 from mmdet3d.models import Base3DDetector
+from mmengine.logging import MessageHub
 from .mask_matrix_nms import mask_matrix_nms
 import open3d as o3d
 import os
@@ -1967,7 +1968,10 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         queries_idx = []
 
         if self.prepare_epoch:
-            if kwargs['epoch'] > self.prepare_epoch:
+            # Get epoch from MessageHub (mmengine no longer passes epoch via kwargs)
+            message_hub = MessageHub.get_current_instance()
+            current_epoch = message_hub.get_info('epoch', 0)
+            if current_epoch > self.prepare_epoch:
                 total_qscore_loss = 0
                 for i in range(batch_size):
                     voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
