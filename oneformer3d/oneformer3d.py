@@ -27,6 +27,7 @@ from sklearn.neighbors import NearestNeighbors
 from plyfile import PlyData, PlyElement
 
 import contextlib, time
+from .ptv3_backbone import Point
 
 class UnionFind:
     def __init__(self, n):
@@ -1775,6 +1776,10 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         self.min_spatial_shape = min_spatial_shape
         self.stuff_classes = stuff_classes
         self.thing_cls = thing_cls
+        self.query_point_num = query_point_num
+        self.radius = radius
+        self.score_th = score_th
+        self.chunk = chunk
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.prepare_epoch = prepare_epoch
@@ -1794,35 +1799,42 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         )
     
     def _init_layers(self, in_channels, num_channels):
-        self.input_conv = spconv.SparseSequential(
-            spconv.SubMConv3d(
-                in_channels,
-                num_channels,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-                indice_key='subm1'))
-        self.output_layer = spconv.SparseSequential(
-            torch.nn.BatchNorm1d(num_channels, eps=1e-4, momentum=0.1),
-            torch.nn.ReLU(inplace=True))
+        # PTV3 backbone handles input conv and output layers.
+        # These layers are now part of the backbone itself.
+        self.Embed = Seq().append(MLP([num_channels, num_channels], bias=False))
+        self.Embed.append(torch.nn.Linear(num_channels, 5))
+        self.BiSemantic = (
+            Seq()
+            .append(MLP([num_channels, num_channels], bias=False))
+            .append(torch.nn.Linear(num_channels, 2))
+            .append(torch.nn.LogSoftmax(dim=-1))
+        )
 
     def extract_feat(self, x):
-        """Extract features from sparse tensor.
-
+        """Extract features from sparse tensor by adapting it for PTV3.
         Args:
-            x (SparseTensor): Input sparse tensor of shape
-                (n_points, in_channels).
-
+            x (spconv.SparseConvTensor): Input sparse tensor.
         Returns:
-            List[Tensor]: of len batch_size,
-                each of shape (n_points_i, n_channels).
+            List[torch.Tensor]: A list of feature tensors, one for each batch item.
         """
-        x = self.input_conv(x)
-        x, _ = self.unet(x)
-        x = self.output_layer(x)
+        # 1. Convert spconv.SparseConvTensor to a `Point` dictionary for PTV3
+        point_dict = {
+            "feat": x.features,
+            "coord": x.indices[:, 1:].float() * self.voxel_size,
+            "grid_coord": x.indices[:, 1:],
+            "batch": x.indices[:, 0],
+            "grid_size": self.voxel_size
+            }
+
+        # Run PTV3 backbone
+        point_out = self.unet(point_dict)
+
+        # Split features by batch
+        feat = point_out.feat
+        batch = point_out.batch
         out = []
-        for i in x.indices[:, 0].unique():
-            out.append(x.features[x.indices[:, 0] == i])
+        for i in range(batch.max().item() + 1):
+            out.append(feat[batch == i])
         return out
 
     def collate(self, points, elastic_points=None):
@@ -2295,7 +2307,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             
             ##########output_path = "/workspace/work_dirs/bluepoint_th04fixed_03_priority_test_tobedelete"
             #########output_path = "/workspace/work_dirs/bluepoint_forinstancev2"
-            output_path = "/workspace/work_dirs/V3"
+            output_path = "work_dirs/V3"
             score_th1 = self.score_th
             score_th2 = 0.3
             t2 = time.time()   
