@@ -151,6 +151,15 @@ class PTV3Backbone(nn.Module):
             - 'state_dict' or 'model': contains weights
             - Keys like 'backbone.xxx' -> we need 'ptv3.xxx'
         
+        What loads:
+            - Encoder blocks (enc.enc0-4): channel dims match if using original PTv3 config
+            - Decoder blocks (dec.dec0-3): channel dims match if using original PTv3 config
+            - All attention, MLP, norm layers in enc/dec
+        
+        What CAN'T load (shape mismatch):
+            - Embedding/stem layer: pretrained has in_channels=6, we have 64 (from input_conv)
+            - This is expected and unavoidable - embedding will be randomly initialized
+        
         Args:
             checkpoint_path: Path to Pointcept checkpoint (.pth file)
         """
@@ -176,7 +185,6 @@ class PTV3Backbone(nn.Module):
         # - 'backbone.enc.xxx' 
         # - 'enc.xxx'
         # All map to: 'ptv3.enc.xxx'
-        # Skip embedding layer (different in_channels: pretrained=6, ours=64)
         new_state_dict = {}
         skipped_embedding = 0
         loaded_count = 0
@@ -186,7 +194,8 @@ class PTV3Backbone(nn.Module):
             if 'seg_head' in key or 'criterion' in key:
                 continue
             
-            # Skip embedding/stem layer due to in_channels mismatch
+            # Skip embedding/stem layer - EXPECTED: shape mismatch (pretrained=6, ours=64 from input_conv)
+            # The embedding layer will be randomly initialized and trained from scratch
             if 'embedding' in key or 'stem' in key:
                 skipped_embedding += 1
                 continue
@@ -214,68 +223,79 @@ class PTV3Backbone(nn.Module):
             new_state_dict[new_key] = value
             loaded_count += 1
         
-        print(f"[PTV3Backbone] Processed {loaded_count} weights, skipped {skipped_embedding} embedding weights")
+        print(f"[PTV3Backbone] Processed {loaded_count} enc/dec weights")
+        print(f"[PTV3Backbone] Skipped {skipped_embedding} embedding weights (expected - shape mismatch)")
         
         # Load with strict=False to allow missing/extra keys
         missing, unexpected = self.load_state_dict(new_state_dict, strict=False)
         
         print(f"[PTV3Backbone] Loaded pretrained weights:")
-        print(f"  - Missing keys: {len(missing)}")
+        print(f"  - Missing keys: {len(missing)} (embedding layer - will train from scratch)")
         print(f"  - Unexpected keys: {len(unexpected)}")
-        if missing:
-            print(f"  - Example missing: {missing[:3]}")
+        if missing and len(missing) <= 10:
+            print(f"  - Missing: {missing}")
+        elif missing:
+            print(f"  - Example missing: {missing[:5]}")
         if unexpected:
             print(f"  - Example unexpected: {unexpected[:3]}")
     
-    def spconv_to_point(self, x: spconv.SparseConvTensor) -> dict:
+    def spconv_to_point(self, x: spconv.SparseConvTensor) -> tuple:
         """Convert spconv.SparseConvTensor to PTV3 data_dict format.
+        
+        PTv3 expects points sorted by batch index. We sort them here and
+        return the inverse permutation to restore original order after processing.
         
         Args:
             x: SparseConvTensor with:
                 - features: (N, C) tensor of point features
-                - indices: (N, 4) tensor of [batch_idx, z, y, x] (spconv format)
+                - indices: (N, 4) tensor of [batch_idx, x, y, z] (MinkowskiEngine format)
                 - spatial_shape: [D, H, W] voxel grid dimensions
                 - batch_size: number of batches
         
         Returns:
-            dict: PTV3-compatible data dict with:
-                - feat: (N, C) features
-                - coord: (N, 3) float coordinates
-                - grid_coord: (N, 3) integer grid coordinates  
-                - batch: (N,) batch indices
-                - offset: (B,) cumulative point counts per batch
+            tuple: (data_dict, sort_idx, unsort_idx)
+                - data_dict: PTV3-compatible data dict with feat, coord, grid_coord, batch, offset
+                - sort_idx: indices that sort points by batch
+                - unsort_idx: indices that restore original order
         """
         features = x.features  # (N, C)
-        indices = x.indices    # (N, 4) - [batch_idx, z, y, x]
+        indices = x.indices    # (N, 4) - [batch_idx, x, y, z] (from MinkowskiEngine)
         
         # Extract batch indices and grid coordinates
         batch_indices = indices[:, 0].long()  # (N,)
-        # spconv uses [batch, z, y, x], convert to [x, y, z] for PTV3
-        grid_coord = indices[:, [3, 2, 1]].int()  # (N, 3) - [x, y, z]
+        # ForestFormer uses MinkowskiEngine which outputs [batch, x, y, z]
+        # PTV3 expects [x, y, z], so just take columns 1, 2, 3
+        grid_coord = indices[:, [1, 2, 3]].int()  # (N, 3) - [x, y, z]
+        
+        # Sort points by batch index (PTv3 expects this)
+        sort_idx = torch.argsort(batch_indices, stable=True)
+        unsort_idx = torch.argsort(sort_idx)  # Inverse permutation
+        
+        # Apply sorting
+        features_sorted = features[sort_idx]
+        batch_sorted = batch_indices[sort_idx]
+        grid_coord_sorted = grid_coord[sort_idx]
         
         # Compute float coordinates from grid coordinates
-        coord = grid_coord.float() * self.grid_size  # (N, 3)
+        coord_sorted = grid_coord_sorted.float() * self.grid_size  # (N, 3)
         
-        # Compute offset from batch indices
-        # offset[i] = cumulative count of points up to and including batch i
-        batch_size = x.batch_size
-        offset = torch.zeros(batch_size, dtype=torch.long, device=features.device)
-        for i in range(batch_size):
-            offset[i] = (batch_indices <= i).sum()
+        # Compute offset using batch2offset (works correctly on sorted batch indices)
+        offset = batch2offset(batch_sorted)
         
         data_dict = {
-            "feat": features,
-            "coord": coord,
-            "grid_coord": grid_coord,
-            "batch": batch_indices,
+            "feat": features_sorted,
+            "coord": coord_sorted,
+            "grid_coord": grid_coord_sorted,
+            "batch": batch_sorted,
             "offset": offset,
         }
         
-        return data_dict
+        return data_dict, sort_idx, unsort_idx
     
     def point_to_spconv(
         self, 
         point: Point, 
+        unsort_idx: torch.Tensor,
         original_indices: torch.Tensor,
         spatial_shape: list,
         batch_size: int
@@ -284,19 +304,23 @@ class PTV3Backbone(nn.Module):
         
         Args:
             point: PTV3 Point object with feat attribute
+            unsort_idx: Indices to restore original point order (before batch sorting)
             original_indices: Original spconv indices (N, 4) to preserve ordering
             spatial_shape: Original spatial shape [D, H, W]
             batch_size: Batch size
             
         Returns:
-            spconv.SparseConvTensor with output features
+            spconv.SparseConvTensor with output features in original order
         """
-        features = point.feat  # (N, C_out)
+        features = point.feat  # (N, C_out) - in sorted order
+        
+        # Restore original point order
+        features_unsorted = features[unsort_idx]
         
         # Create new SparseConvTensor with output features
         # Use original indices to maintain point ordering
         output = spconv.SparseConvTensor(
-            features=features,
+            features=features_unsorted,
             indices=original_indices,
             spatial_shape=spatial_shape,
             batch_size=batch_size,
@@ -320,15 +344,15 @@ class PTV3Backbone(nn.Module):
         spatial_shape = x.spatial_shape
         batch_size = x.batch_size
         
-        # Convert to PTV3 format
-        data_dict = self.spconv_to_point(x)
+        # Convert to PTV3 format (sorts by batch, returns unsort indices)
+        data_dict, sort_idx, unsort_idx = self.spconv_to_point(x)
         
         # Run PTV3
         point = self.ptv3(data_dict)
         
-        # Convert back to spconv format
+        # Convert back to spconv format (restores original order)
         output = self.point_to_spconv(
-            point, original_indices, spatial_shape, batch_size
+            point, unsort_idx, original_indices, spatial_shape, batch_size
         )
         
         if self.return_blocks:
@@ -343,14 +367,14 @@ class PTV3BackboneSimple(nn.Module):
     """Simplified PTV3 backbone with commonly used defaults.
     
     This is a convenience wrapper with sensible defaults for forest/outdoor
-    point cloud segmentation.
+    point cloud segmentation. Uses original PTv3 channels for pretrained weight compatibility.
     """
     
     def __init__(
         self,
-        in_channels=3,
+        in_channels=64,  # Default matches ForestFormer's input_conv output
         out_channels=64,
-        grid_size=0.06,
+        grid_size=0.2,  # Default matches ForestFormer's voxel size
         enable_flash=True,
         drop_path=0.3,
         return_blocks=False,
@@ -362,6 +386,7 @@ class PTV3BackboneSimple(nn.Module):
             order=("z", "z-trans", "hilbert", "hilbert-trans"),
             stride=(2, 2, 2, 2),
             enc_depths=(2, 2, 2, 6, 2),
+            # Original PTv3 channels - matches pretrained weights
             enc_channels=(32, 64, 128, 256, 512),
             enc_num_head=(2, 4, 8, 16, 32),
             enc_patch_size=(1024, 1024, 1024, 1024, 1024),

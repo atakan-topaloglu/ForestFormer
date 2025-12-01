@@ -23,11 +23,15 @@ model = dict(
     radius=radius,
     backbone=dict(
         type='PTV3Backbone',
-        in_channels=num_channels,  # After input_conv projection
-        pretrained='/cluster/scratch/atopaloglu/projects/ptv3/pretrained/ptv3_scannet_base.pth',  # Pretrained on ScanNet
+        in_channels=num_channels,  # After input_conv projection (64)
+        # Pretrained ScanNet weights - embedding layer skipped (6 vs 64 channels)
+        # but encoder/decoder weights load successfully
+        pretrained='/cluster/scratch/atopaloglu/projects/ptv3/pretrained/ptv3_scannet_base.pth',
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
+        # Original PTv3 channels - matches pretrained weights for enc/dec
+        # Note: embedding does 64->32 (unusual but encoder/decoder weights load)
         enc_channels=(32, 64, 128, 256, 512),
         enc_num_head=(2, 4, 8, 16, 32),
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
