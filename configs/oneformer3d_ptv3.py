@@ -225,7 +225,6 @@ train_dataloader = dict(
     num_workers=6,
     persistent_workers=True,
     pin_memory=True,
-    prefetch_factor=6,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
         type=dataset_type,
@@ -291,11 +290,16 @@ optim_wrapper = dict(
 param_scheduler = dict(type='PolyLR', begin=0, end=450000, power=0.9, by_epoch=False)
 
 # Hooks
-custom_hooks = [dict(type='EmptyCacheHook', after_iter=True)]
+custom_hooks = [
+    dict(type='EmptyCacheHook', after_iter=True),
+    # Fix spconv weight format for SpConvUNet during validation + checkpoint saving
+    # NOTE: PTV3Backbone is automatically skipped (doesn't have this issue)
+    dict(type='SpConvWeightFixHook', verbose=False),
+]
 default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook',
-        interval=1,
+        interval=100,
         max_keep_ckpts=3,
         save_optimizer=True),
     logger=dict(type='LoggerHook', interval=20),

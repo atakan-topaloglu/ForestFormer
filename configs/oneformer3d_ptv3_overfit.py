@@ -144,11 +144,12 @@ train_pipeline = [
         with_label_3d=False,
         with_mask_3d=True,
         with_seg_3d=True),
-    dict(type='CylinderCrop', radius=radius),
-    dict(type='GridSample', grid_size=grid_size),
+    dict(type='CylinderCrop', radius=radius, deterministic=True),
+    dict(type='GridSample', grid_size=grid_size, deterministic=True),
     dict(
         type='PointSample_',
-        num_points=100000),  # Reduced for faster iteration
+        num_points=640000,
+        deterministic=True),  # Reduced for faster iteration
     dict(type='SkipEmptyScene_'),
     dict(type='PointInstClassMapping_',
         num_classes=num_instance_classes),
@@ -175,11 +176,12 @@ val_pipeline = [
         with_label_3d=False,
         with_mask_3d=True,
         with_seg_3d=True),
-    dict(type='CylinderCrop', radius=radius),
-    dict(type='GridSample', grid_size=grid_size),
+    dict(type='CylinderCrop', radius=radius, deterministic=True),
+    dict(type='GridSample', grid_size=grid_size, deterministic=True),
     dict(
         type='PointSample_',
-        num_points=100000),
+        num_points=640000,
+        deterministic=True),
     dict(type='PointInstClassMapping_',
         num_classes=num_instance_classes),
     dict(type='Pack3DDetInputs_', keys=['points', 'gt_labels_3d', 'pts_semantic_mask', 'pts_instance_mask'])
@@ -191,6 +193,7 @@ train_dataloader = dict(
     num_workers=2,
     persistent_workers=True,
     pin_memory=True,
+    prefetch_factor=2,
     sampler=dict(type='DefaultSampler', shuffle=False),  # No shuffle - same sample
     dataset=dict(
         type=dataset_type,
@@ -252,14 +255,21 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=10, norm_type=2))
 
 # No LR scheduler - constant LR
-param_scheduler = None
+param_scheduler = [
+    dict(
+        type='CosineAnnealingLR',
+        by_epoch=False,
+        T_max=1000,     # total epochs
+        eta_min=1e-6   # final LR
+    )
+]
 
 # Hooks - log frequently to monitor loss
 custom_hooks = [
     dict(type='EmptyCacheHook', after_iter=True),
-    # Fix spconv weight format during validation for accurate metrics
-    # This permutes weights before val/test and restores after
-    # Also saves checkpoints in correct format (no need for fix_spconv_checkpoint.py!)
+    # Fix spconv weight format for SpConvUNet during validation + checkpoint saving
+    # NOTE: PTV3Backbone is automatically skipped (doesn't have this issue)
+    # For SpConvUNet: fixes validation metrics AND saves checkpoints correctly
     dict(type='SpConvWeightFixHook', verbose=True),
 ]
 default_hooks = dict(

@@ -1108,7 +1108,7 @@ class PTV3Backbone(nn.Module):
     
     This wrapper adapts PTV3 to work with ForestFormer's data flow:
     1. Takes input from ForestFormer's collate function
-    2. Converts to PTV3's Point format with proper feature padding
+    2. Converts to PTV3's Point format with proper feature handling
     3. Runs PTV3 encoder-decoder
     4. Returns features in ForestFormer's expected format
     
@@ -1117,6 +1117,12 @@ class PTV3Backbone(nn.Module):
         grid_size (float): Voxel size for grid sampling. Default: 0.02
         out_channels (int): Output feature channels. Default: 64
         pretrained (str): Path to pretrained weights. Default: None
+        input_mode (str): How to handle input channel mismatch. Options:
+            - "zero_pad": Zero-pad input to 6 channels (default, backward compatible)
+            - "adapter": Use learnable adapter layer to project 3D -> 6D
+            - "reinit_embedding": Re-initialize embedding layer to accept 3 channels
+        freeze_backbone (bool): Freeze encoder/decoder weights (not embedding). Default: False
+        freeze_embedding (bool): Freeze embedding layer weights. Default: False
         order (tuple): Serialization orders. Default: ("z", "z-trans", "hilbert", "hilbert-trans")
         stride (tuple): Downsampling strides. Default: (2, 2, 2, 2)
         enc_depths (tuple): Encoder block depths. Default: (2, 2, 2, 6, 2)
@@ -1140,6 +1146,9 @@ class PTV3Backbone(nn.Module):
         grid_size=0.02,
         out_channels=64,
         pretrained=None,
+        input_mode="zero_pad",  # "zero_pad", "adapter", or "reinit_embedding"
+        freeze_backbone=False,
+        freeze_embedding=False,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
@@ -1174,14 +1183,32 @@ class PTV3Backbone(nn.Module):
         self.in_channels = in_channels
         self.grid_size = grid_size
         self.out_channels = out_channels
+        self.input_mode = input_mode
+        self.freeze_backbone = freeze_backbone
+        self.freeze_embedding = freeze_embedding
         
-        # PTV3 expects 6-channel input for pretrained weights
-        # We'll zero-pad from in_channels to 6
-        self.ptv3_in_channels = 6
+        assert input_mode in ["zero_pad", "adapter", "reinit_embedding"], \
+            f"input_mode must be 'zero_pad', 'adapter', or 'reinit_embedding', got {input_mode}"
+        
+        # Determine PTV3 input channels based on mode
+        if input_mode == "reinit_embedding":
+            # Build PTV3 with actual input channels (embedding will be re-initialized)
+            self.ptv3_in_channels = in_channels
+        else:
+            # For zero_pad and adapter modes, PTV3 expects 6 channels
+            self.ptv3_in_channels = 6
         
         # Store PDNorm settings for condition handling
         self.use_pdnorm = pdnorm_bn or pdnorm_ln
         self.pdnorm_condition = pdnorm_conditions[0] if pdnorm_conditions else "ForAINet"
+        
+        # Build input adapter if using adapter mode
+        if input_mode == "adapter":
+            self.input_adapter = nn.Sequential(
+                nn.Linear(in_channels, 6),
+                nn.LayerNorm(6),
+            )
+            print(f"[PTV3] Created input adapter: {in_channels}D -> 6D")
         
         # Build PTV3 backbone
         self.ptv3 = PointTransformerV3(
@@ -1230,6 +1257,33 @@ class PTV3Backbone(nn.Module):
         # Load pretrained weights if provided
         if pretrained is not None:
             self.load_pretrained(pretrained)
+        
+        # Apply freezing after loading pretrained weights
+        self._apply_freezing()
+    
+    def _apply_freezing(self):
+        """Apply freezing to backbone and/or embedding based on config."""
+        if self.freeze_backbone:
+            frozen_count = 0
+            # Freeze encoder and decoder, but not embedding
+            for name, param in self.ptv3.named_parameters():
+                if name.startswith('enc.') or name.startswith('dec.'):
+                    param.requires_grad = False
+                    frozen_count += 1
+            print(f"[PTV3] Froze {frozen_count} encoder/decoder parameters")
+        
+        if self.freeze_embedding:
+            frozen_count = 0
+            for name, param in self.ptv3.named_parameters():
+                if name.startswith('embedding.'):
+                    param.requires_grad = False
+                    frozen_count += 1
+            print(f"[PTV3] Froze {frozen_count} embedding parameters")
+        
+        # Print trainable parameter summary
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print(f"[PTV3] Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
     
     def load_pretrained(self, pretrained_path):
         """
@@ -1240,6 +1294,7 @@ class PTV3Backbone(nn.Module):
         2. Direct state dict format
         
         Handles SpConv weight format differences between versions by permuting weights.
+        For 'reinit_embedding' mode, skips loading embedding weights.
         
         Args:
             pretrained_path (str): Path to pretrained checkpoint file.
@@ -1248,6 +1303,7 @@ class PTV3Backbone(nn.Module):
         logger = logging.getLogger(__name__)
         
         print(f"[PTV3] Loading pretrained weights from {pretrained_path}")
+        print(f"[PTV3] Input mode: {self.input_mode}")
         
         checkpoint = torch.load(pretrained_path, map_location='cpu')
         
@@ -1290,9 +1346,16 @@ class PTV3Backbone(nn.Module):
         loaded_count = 0
         skipped_count = 0
         permuted_count = 0
+        reinit_count = 0
         
         with torch.no_grad():
             for name, param in self.ptv3.named_parameters():
+                # For reinit_embedding mode, skip embedding layer weights
+                if self.input_mode == "reinit_embedding" and name.startswith('embedding.'):
+                    print(f"[PTV3] REINIT (not loading): {name}")
+                    reinit_count += 1
+                    continue
+                
                 if name in ptv3_state_dict:
                     ckpt_weight = ptv3_state_dict[name]
                     
@@ -1327,13 +1390,19 @@ class PTV3Backbone(nn.Module):
             
             # Also load buffers (running_mean, running_var, etc.)
             for name, buffer in self.ptv3.named_buffers():
+                # Skip embedding buffers for reinit_embedding mode
+                if self.input_mode == "reinit_embedding" and name.startswith('embedding.'):
+                    reinit_count += 1
+                    continue
+                    
                 if name in ptv3_state_dict:
                     ckpt_buffer = ptv3_state_dict[name]
                     if ckpt_buffer.shape == buffer.shape:
                         buffer.copy_(ckpt_buffer)
                         loaded_count += 1
         
-        print(f"[PTV3] Loaded {loaded_count} weights, permuted {permuted_count}, skipped {skipped_count}")
+        print(f"[PTV3] Loaded {loaded_count} weights, permuted {permuted_count}, "
+              f"skipped {skipped_count}, re-initialized {reinit_count}")
 
     def forward(self, x: spconv.SparseConvTensor):
         """
@@ -1356,15 +1425,21 @@ class PTV3Backbone(nn.Module):
         batch_indices = indices[:, 0].long()
         coords = indices[:, 1:].float()  # Grid coordinates
         
-        # Zero-pad features to 6 channels if needed
-        if features.shape[1] < self.ptv3_in_channels:
-            padding = torch.zeros(
-                features.shape[0], 
-                self.ptv3_in_channels - features.shape[1],
-                device=features.device,
-                dtype=features.dtype
-            )
-            features = torch.cat([features, padding], dim=1)
+        # Handle input channels based on mode
+        if self.input_mode == "adapter":
+            # Use learnable adapter to project to 6 channels
+            features = self.input_adapter(features)
+        elif self.input_mode == "zero_pad":
+            # Zero-pad features to 6 channels if needed
+            if features.shape[1] < self.ptv3_in_channels:
+                padding = torch.zeros(
+                    features.shape[0], 
+                    self.ptv3_in_channels - features.shape[1],
+                    device=features.device,
+                    dtype=features.dtype
+                )
+                features = torch.cat([features, padding], dim=1)
+        # For "reinit_embedding" mode, features are passed as-is (3 channels)
         
         # Compute offset from batch indices
         # offset[i] = cumulative count of points up to batch i

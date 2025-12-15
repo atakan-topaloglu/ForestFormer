@@ -229,7 +229,13 @@ optim_wrapper = dict(
 
 param_scheduler = dict(type='PolyLR', begin=0, end=450000, power=0.9, by_epoch=False)
 
-custom_hooks = [dict(type='EmptyCacheHook', after_iter=True)]
+custom_hooks = [
+    dict(type='EmptyCacheHook', after_iter=True),
+    # Fix spconv weight format for SpConvUNet during validation + checkpoint saving
+    # This gives you ACCURATE validation metrics during training!
+    # Also saves checkpoints in correct format (no need for fix_spconv_checkpoint.py)
+    dict(type='SpConvWeightFixHook', verbose=False),
+]
 default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook',
