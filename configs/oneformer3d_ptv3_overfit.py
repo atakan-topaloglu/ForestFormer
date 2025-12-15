@@ -193,7 +193,6 @@ train_dataloader = dict(
     num_workers=2,
     persistent_workers=True,
     pin_memory=True,
-    prefetch_factor=2,
     sampler=dict(type='DefaultSampler', shuffle=False),  # No shuffle - same sample
     dataset=dict(
         type=dataset_type,
@@ -254,13 +253,12 @@ optim_wrapper = dict(
     optimizer=dict(type='AdamW', lr=0.001, weight_decay=0.0),  # Higher LR, no weight decay
     clip_grad=dict(max_norm=10, norm_type=2))
 
-# No LR scheduler - constant LR
 param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         by_epoch=False,
         T_max=1000,     # total epochs
-        eta_min=1e-6   # final LR
+        eta_min=1e-5   # final LR
     )
 ]
 
@@ -291,7 +289,7 @@ visualizer = dict(
 train_cfg = dict(
     type='IterBasedTrainLoop',
     max_iters=1000,  # 1000 iterations should be enough to overfit
-    val_interval=20)  # Validate every 100 iterations
+    val_interval=100)  # Validate every 100 iterations
 
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')

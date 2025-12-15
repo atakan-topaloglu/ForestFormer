@@ -442,6 +442,55 @@ class RPE(nn.Module):
         return out
 
 
+class LoRALinear(nn.Module):
+    """LoRA wrapper for nn.Linear.
+
+    Implements: y = W x + b + (alpha/r) * B(A(dropout(x)))
+    where A: in->r, B: r->out.
+
+    Notes:
+    - By default, base weights are frozen (train_base=False) and only LoRA params train.
+    - LoRA params are initialized with B=0 so the initial behavior matches the base layer.
+    """
+
+    def __init__(
+        self,
+        base: nn.Linear,
+        r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        train_base: bool = False,
+    ):
+        super().__init__()
+        assert isinstance(base, nn.Linear)
+        assert r >= 0
+
+        self.base = base
+        self.r = int(r)
+        self.lora_alpha = int(lora_alpha)
+        self.scaling = (self.lora_alpha / self.r) if self.r > 0 else 0.0
+        self.lora_dropout = nn.Dropout(lora_dropout) if lora_dropout > 0.0 else nn.Identity()
+
+        if not train_base:
+            for p in self.base.parameters():
+                p.requires_grad = False
+
+        if self.r > 0:
+            self.lora_A = nn.Linear(self.base.in_features, self.r, bias=False)
+            self.lora_B = nn.Linear(self.r, self.base.out_features, bias=False)
+            nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B.weight)
+        else:
+            self.lora_A = None
+            self.lora_B = None
+
+    def forward(self, x):
+        out = self.base(x)
+        if self.r > 0:
+            out = out + self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
+        return out
+
+
 class SerializedAttention(PointModule):
     """Serialized Attention with optional Flash Attention."""
     def __init__(
@@ -458,6 +507,11 @@ class SerializedAttention(PointModule):
         enable_flash=True,
         upcast_attention=True,
         upcast_softmax=True,
+        lora_enabled: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_train_base: bool = False,
     ):
         super().__init__()
         assert channels % num_heads == 0
@@ -482,8 +536,26 @@ class SerializedAttention(PointModule):
             self.patch_size = 0
             self.attn_drop = nn.Dropout(attn_drop)
 
-        self.qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
-        self.proj = nn.Linear(channels, channels)
+        qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
+        proj = nn.Linear(channels, channels)
+        if lora_enabled and lora_r > 0:
+            self.qkv = LoRALinear(
+                qkv,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                train_base=lora_train_base,
+            )
+            self.proj = LoRALinear(
+                proj,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                train_base=lora_train_base,
+            )
+        else:
+            self.qkv = qkv
+            self.proj = proj
         self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
         self.rpe = RPE(patch_size, num_heads) if self.enable_rpe else None
@@ -612,14 +684,38 @@ class MLP(nn.Module):
         out_channels=None,
         act_layer=nn.GELU,
         drop=0.0,
+        lora_enabled: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_train_base: bool = False,
     ):
         super().__init__()
         out_channels = out_channels or in_channels
         hidden_channels = hidden_channels or in_channels
-        self.fc1 = nn.Linear(in_channels, hidden_channels)
+        fc1 = nn.Linear(in_channels, hidden_channels)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_channels, out_channels)
+        fc2 = nn.Linear(hidden_channels, out_channels)
         self.drop = nn.Dropout(drop)
+
+        if lora_enabled and lora_r > 0:
+            self.fc1 = LoRALinear(
+                fc1,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                train_base=lora_train_base,
+            )
+            self.fc2 = LoRALinear(
+                fc2,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                train_base=lora_train_base,
+            )
+        else:
+            self.fc1 = fc1
+            self.fc2 = fc2
 
     def forward(self, x):
         x = self.fc1(x)
@@ -652,6 +748,12 @@ class Block(PointModule):
         enable_flash=True,
         upcast_attention=True,
         upcast_softmax=True,
+        lora_attention: bool = False,
+        lora_mlp: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_train_base: bool = False,
     ):
         super().__init__()
         self.channels = channels
@@ -683,6 +785,11 @@ class Block(PointModule):
             enable_flash=enable_flash,
             upcast_attention=upcast_attention,
             upcast_softmax=upcast_softmax,
+            lora_enabled=lora_attention,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_train_base=lora_train_base,
         )
         self.norm2 = PointSequential(norm_layer(channels))
         self.mlp = PointSequential(
@@ -692,6 +799,11 @@ class Block(PointModule):
                 out_channels=channels,
                 act_layer=act_layer,
                 drop=proj_drop,
+                lora_enabled=lora_mlp,
+                lora_r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_train_base=lora_train_base,
             )
         )
         self.drop_path = PointSequential(
@@ -928,12 +1040,28 @@ class PointTransformerV3(PointModule):
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ForAINet",),
+        # LoRA (optional, parameter-efficient fine-tuning)
+        lora_enabled: bool = False,
+        lora_attention: bool = True,
+        lora_mlp: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_train_base: bool = False,
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
+
+        self.lora_enabled = bool(lora_enabled and (lora_r > 0))
+        self.lora_attention = bool(lora_attention)
+        self.lora_mlp = bool(lora_mlp)
+        self.lora_r = int(lora_r)
+        self.lora_alpha = int(lora_alpha)
+        self.lora_dropout = float(lora_dropout)
+        self.lora_train_base = bool(lora_train_base)
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -1019,6 +1147,12 @@ class PointTransformerV3(PointModule):
                         enable_flash=enable_flash,
                         upcast_attention=upcast_attention,
                         upcast_softmax=upcast_softmax,
+                        lora_attention=(self.lora_enabled and self.lora_attention),
+                        lora_mlp=(self.lora_enabled and self.lora_mlp),
+                        lora_r=self.lora_r,
+                        lora_alpha=self.lora_alpha,
+                        lora_dropout=self.lora_dropout,
+                        lora_train_base=self.lora_train_base,
                     ),
                     name=f"block{i}",
                 )
@@ -1069,6 +1203,12 @@ class PointTransformerV3(PointModule):
                             enable_flash=enable_flash,
                             upcast_attention=upcast_attention,
                             upcast_softmax=upcast_softmax,
+                            lora_attention=(self.lora_enabled and self.lora_attention),
+                            lora_mlp=(self.lora_enabled and self.lora_mlp),
+                            lora_r=self.lora_r,
+                            lora_alpha=self.lora_alpha,
+                            lora_dropout=self.lora_dropout,
+                            lora_train_base=self.lora_train_base,
                         ),
                         name=f"block{i}",
                     )
@@ -1149,6 +1289,15 @@ class PTV3Backbone(nn.Module):
         input_mode="zero_pad",  # "zero_pad", "adapter", or "reinit_embedding"
         freeze_backbone=False,
         freeze_embedding=False,
+        # LoRA (optional, parameter-efficient fine-tuning)
+        lora_enabled: bool = False,
+        lora_attention: bool = True,
+        lora_mlp: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_train_base: bool = False,
+        keep_lora_trainable: bool = True,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
@@ -1186,6 +1335,8 @@ class PTV3Backbone(nn.Module):
         self.input_mode = input_mode
         self.freeze_backbone = freeze_backbone
         self.freeze_embedding = freeze_embedding
+        self.lora_enabled = bool(lora_enabled and (lora_r > 0))
+        self.keep_lora_trainable = bool(keep_lora_trainable)
         
         assert input_mode in ["zero_pad", "adapter", "reinit_embedding"], \
             f"input_mode must be 'zero_pad', 'adapter', or 'reinit_embedding', got {input_mode}"
@@ -1242,6 +1393,13 @@ class PTV3Backbone(nn.Module):
             pdnorm_adaptive=pdnorm_adaptive,
             pdnorm_affine=pdnorm_affine,
             pdnorm_conditions=pdnorm_conditions,
+            lora_enabled=self.lora_enabled,
+            lora_attention=lora_attention,
+            lora_mlp=lora_mlp,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_train_base=lora_train_base,
         )
         
         # Output layer to ensure proper output format
@@ -1268,6 +1426,8 @@ class PTV3Backbone(nn.Module):
             # Freeze encoder and decoder, but not embedding
             for name, param in self.ptv3.named_parameters():
                 if name.startswith('enc.') or name.startswith('dec.'):
+                    if self.keep_lora_trainable and ('lora_A' in name or 'lora_B' in name):
+                        continue
                     param.requires_grad = False
                     frozen_count += 1
             print(f"[PTV3] Froze {frozen_count} encoder/decoder parameters")
@@ -1276,6 +1436,8 @@ class PTV3Backbone(nn.Module):
             frozen_count = 0
             for name, param in self.ptv3.named_parameters():
                 if name.startswith('embedding.'):
+                    if self.keep_lora_trainable and ('lora_A' in name or 'lora_B' in name):
+                        continue
                     param.requires_grad = False
                     frozen_count += 1
             print(f"[PTV3] Froze {frozen_count} embedding parameters")

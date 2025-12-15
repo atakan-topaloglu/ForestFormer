@@ -300,6 +300,10 @@ class PointInstClassMapping_(BaseTransform):
 @TRANSFORMS.register_module()
 class PointSample_(PointSample):
 
+    def __init__(self, num_points, deterministic=False, **kwargs):
+        super().__init__(num_points=num_points, **kwargs)
+        self.deterministic = deterministic
+
     def _points_random_sampling(self, points, num_samples):
         """Points random sampling. Sample points to a certain number.
         
@@ -314,8 +318,11 @@ class PointSample_(PointSample):
         """
 
         point_range = range(len(points))
-        choices = np.random.choice(point_range, 
-                                   min(num_samples, len(points)))
+        if self.deterministic:
+            choices = np.arange(min(num_samples, len(points)))
+        else:
+            choices = np.random.choice(
+                point_range, min(num_samples, len(points)), replace=False)
         
         return points[choices], choices
 
@@ -465,8 +472,9 @@ class SkipEmptyScene_(BaseTransform):
 
 @TRANSFORMS.register_module()
 class CylinderCrop(BaseTransform):
-    def __init__(self, radius=8):
+    def __init__(self, radius=8, deterministic=False):
         self.radius = radius
+        self.deterministic = deterministic
 
     def transform(self, input_dict):
 
@@ -476,7 +484,10 @@ class CylinderCrop(BaseTransform):
         points_tensor = input_dict["points"].tensor.numpy()
         
         # Select a random center point
-        center = points_tensor[np.random.randint(points_tensor.shape[0])]
+        if self.deterministic:
+            center = np.mean(points_tensor[:, :3], axis=0)
+        else:
+            center = points_tensor[np.random.randint(points_tensor.shape[0])]
         
         # Calculate indices of points within the radius
         choices = np.where(
@@ -679,10 +690,11 @@ class CylinderCrop_RemoveOutpoints(BaseTransform):
 
 @TRANSFORMS.register_module()
 class GridSample(BaseTransform):
-    def __init__(self, grid_size=0.2, mode="train", hash_type="fnv"):
+    def __init__(self, grid_size=0.2, mode="train", hash_type="fnv", deterministic=False):
         self.grid_size = grid_size
         self.mode = mode
         self.hash = self.fnv_hash_vec if hash_type == "fnv" else self.ravel_hash_vec
+        self.deterministic = deterministic
 
     def transform(self, input_dict):
         assert "points" in input_dict.keys()
@@ -702,10 +714,14 @@ class GridSample(BaseTransform):
         _, inverse, count = unique_results
 
         if self.mode == "train":  # train mode
-            idx_select = (
-                torch.cumsum(torch.cat((torch.tensor([0]), count[:-1])), dim=0)
-                + torch.randint(0, count.max(), count.size()) % count
-            )
+            if self.deterministic:
+                idx_select = torch.cumsum(
+                    torch.cat((torch.tensor([0]), count[:-1])), dim=0)
+            else:
+                idx_select = (
+                    torch.cumsum(torch.cat((torch.tensor([0]), count[:-1])), dim=0)
+                    + torch.randint(0, count.max(), count.size()) % count
+                )
             choices = idx_sort[idx_select]
         else:
             raise NotImplementedError("Only train mode is implemented in this example")
