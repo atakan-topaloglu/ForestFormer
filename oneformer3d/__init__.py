@@ -19,4 +19,4 @@ from .data_preprocessor import Det3DDataPreprocessor_
 from .unified_metric import UnifiedSegMetric
 from .structures import InstanceData_
 from .forainetv2_dataset import ForAINetV2SegDataset_
-from .spconv_fix_hook import SpConvWeightFixHook, SpConvCheckpointFixHook
+# from .spconv_fix_hook import SpConvWeightFixHook, SpConvCheckpointFixHook

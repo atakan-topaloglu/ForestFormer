@@ -234,7 +234,7 @@ custom_hooks = [
     # Fix spconv weight format for SpConvUNet during validation + checkpoint saving
     # This gives you ACCURATE validation metrics during training!
     # Also saves checkpoints in correct format (no need for fix_spconv_checkpoint.py)
-    dict(type='SpConvWeightFixHook', verbose=False),
+    # dict(type='SpConvWeightFixHook', verbose=False),
 ]
 default_hooks = dict(
     checkpoint=dict(

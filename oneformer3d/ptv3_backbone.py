@@ -1289,6 +1289,7 @@ class PTV3Backbone(nn.Module):
         input_mode="zero_pad",  # "zero_pad", "adapter", or "reinit_embedding"
         freeze_backbone=False,
         freeze_embedding=False,
+        use_gradient_checkpointing=False,  # Enable gradient checkpointing for memory savings
         # LoRA (optional, parameter-efficient fine-tuning)
         lora_enabled: bool = False,
         lora_attention: bool = True,
@@ -1335,8 +1336,12 @@ class PTV3Backbone(nn.Module):
         self.input_mode = input_mode
         self.freeze_backbone = freeze_backbone
         self.freeze_embedding = freeze_embedding
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         self.lora_enabled = bool(lora_enabled and (lora_r > 0))
         self.keep_lora_trainable = bool(keep_lora_trainable)
+        
+        if self.use_gradient_checkpointing:
+            print(f"[PTV3] Gradient checkpointing ENABLED for memory savings")
         
         assert input_mode in ["zero_pad", "adapter", "reinit_embedding"], \
             f"input_mode must be 'zero_pad', 'adapter', or 'reinit_embedding', got {input_mode}"
@@ -1621,8 +1626,43 @@ class PTV3Backbone(nn.Module):
         if self.use_pdnorm:
             data_dict["condition"] = self.pdnorm_condition
         
-        # Run PTV3
-        point = self.ptv3(data_dict)
+        # Run PTV3 with gradient checkpointing if enabled
+        if self.use_gradient_checkpointing and self.training:
+            # Use gradient checkpointing to save memory during backward pass
+            # This trades compute for memory by recomputing activations
+            import torch.utils.checkpoint as checkpoint
+            
+            # Create Point and do serialization/sparsify (these are cheap, non-differentiable ops)
+            point = Point(data_dict)
+            point.serialization(order=self.ptv3.order, shuffle_orders=self.ptv3.shuffle_orders)
+            point.sparsify()
+            
+            # Run embedding normally (small, and we want full gradients for training)
+            point = self.ptv3.embedding(point)
+            
+            # AGGRESSIVE checkpointing: checkpoint each encoder stage separately
+            # This maximizes memory savings by minimizing stored activations
+            # Iterate through encoder stages in order
+            for stage_name, stage_module in self.ptv3.enc._modules.items():
+                # Use lambda with proper closure to capture stage_module
+                point = checkpoint.checkpoint(
+                    lambda p, m=stage_module: m(p),
+                    point,
+                    use_reentrant=False
+                )
+            
+            # AGGRESSIVE checkpointing: checkpoint each decoder stage separately
+            # Iterate through decoder stages in order
+            for stage_name, stage_module in self.ptv3.dec._modules.items():
+                # Use lambda with proper closure to capture stage_module
+                point = checkpoint.checkpoint(
+                    lambda p, m=stage_module: m(p),
+                    point,
+                    use_reentrant=False
+                )
+        else:
+            # Normal forward pass without checkpointing
+            point = self.ptv3(data_dict)
         
         # Apply output normalization
         output_feat = self.output_layer(point.feat)
