@@ -1337,6 +1337,7 @@ class PTV3Backbone(nn.Module):
         self.freeze_backbone = freeze_backbone
         self.freeze_embedding = freeze_embedding
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.enable_flash = enable_flash  # Store for checkpointing compatibility check
         self.lora_enabled = bool(lora_enabled and (lora_r > 0))
         self.keep_lora_trainable = bool(keep_lora_trainable)
         
@@ -1632,6 +1633,13 @@ class PTV3Backbone(nn.Module):
             # This trades compute for memory by recomputing activations
             import torch.utils.checkpoint as checkpoint
             
+            # Check if flash attention is enabled (incompatible with use_reentrant=False)
+            # Flash attention saves tensors in context that don't work with non-reentrant checkpointing
+            # When flash attention is enabled, we must use use_reentrant=True
+            use_reentrant = self.enable_flash
+            if use_reentrant:
+                print("[PTV3] Using reentrant checkpointing (use_reentrant=True) due to flash attention compatibility")
+            
             # Create Point and do serialization/sparsify (these are cheap, non-differentiable ops)
             point = Point(data_dict)
             point.serialization(order=self.ptv3.order, shuffle_orders=self.ptv3.shuffle_orders)
@@ -1640,26 +1648,24 @@ class PTV3Backbone(nn.Module):
             # Run embedding normally (small, and we want full gradients for training)
             point = self.ptv3.embedding(point)
             
-            # AGGRESSIVE checkpointing: checkpoint each encoder stage separately
-            # This maximizes memory savings by minimizing stored activations
+            # Checkpoint encoder stages separately
+            # This saves memory by recomputing encoder activations during backward pass
             # Iterate through encoder stages in order
             for stage_name, stage_module in self.ptv3.enc._modules.items():
                 # Use lambda with proper closure to capture stage_module
                 point = checkpoint.checkpoint(
                     lambda p, m=stage_module: m(p),
                     point,
-                    use_reentrant=False
+                    use_reentrant=use_reentrant
                 )
             
-            # AGGRESSIVE checkpointing: checkpoint each decoder stage separately
-            # Iterate through decoder stages in order
+            # NOTE: Do NOT checkpoint decoder stages because they contain Unpooling operations
+            # that require "pooling_parent" and "pooling_inverse" keys from encoder stages.
+            # These keys are part of the point dictionary structure and checkpointing breaks
+            # the connection between pooling (encoder) and unpooling (decoder) operations.
+            # Run decoder stages normally to preserve the point dictionary structure
             for stage_name, stage_module in self.ptv3.dec._modules.items():
-                # Use lambda with proper closure to capture stage_module
-                point = checkpoint.checkpoint(
-                    lambda p, m=stage_module: m(p),
-                    point,
-                    use_reentrant=False
-                )
+                point = stage_module(point)
         else:
             # Normal forward pass without checkpointing
             point = self.ptv3(data_dict)

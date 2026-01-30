@@ -836,7 +836,7 @@ class ForAINetV2OneFormer3D(Base3DDetector):
             clean_all_pre_ins = np.vectorize(relabel_map.get)(clean_all_pre_ins)
 
             # Save the final combined results
-            region_path = f"/workspace/work_dirs/oneformer3d_radius16_qp300_e2675_test_bm1_austrian/{current_filename}_final_results.ply"
+            region_path = f"./work_dirs/oneformer3d_radius16_qp300_e2675_test_bm1_austrian/{current_filename}_final_results.ply"
             self.save_ply_withscore(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, global_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
             
             for i, data_sample in enumerate(batch_data_samples):
@@ -2124,7 +2124,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             # Initialize an empty set to store the covered instance labels
             covered_instance_labels_qp = set()
 
-            output_path = "/workspace/work_dirs/oneformer3d_outputfolder"
+            output_path = "./work_dirs/oneformer3d_outputfolder"
             for region_idx, region in enumerate(tqdm(regions, desc="Processing regions")):
                 region_mask = ((original_points[:, 0] - region[0]) ** 2 + (original_points[:, 1] - region[1]) ** 2) <= self.radius ** 2
                 pc1 = original_points[region_mask]
@@ -2295,7 +2295,7 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             
             ##########output_path = "/workspace/work_dirs/bluepoint_th04fixed_03_priority_test_tobedelete"
             #########output_path = "/workspace/work_dirs/bluepoint_forinstancev2"
-            output_path = "/workspace/work_dirs/V3"
+            output_path = "./work_dirs/V3"
             score_th1 = self.score_th
             score_th2 = 0.3
             t2 = time.time()   
